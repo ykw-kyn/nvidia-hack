@@ -1,0 +1,32 @@
+name: Phase 1 Cloud Recon
+
+# Triggers: Manual button click AND automated schedule
+on:
+  workflow_dispatch: 
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  run-recon:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Dependencies
+        run: |
+          cd worker
+          pip install -r requirements.txt
+
+      - name: Execute Reconnaissance
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+        run: |
+          cd worker
+          python recon_worker.py
