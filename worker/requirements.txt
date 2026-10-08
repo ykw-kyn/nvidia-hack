@@ -1,0 +1,5 @@
+asyncpg
+tavily-python
+openai
+pydantic
+python-dotenv
