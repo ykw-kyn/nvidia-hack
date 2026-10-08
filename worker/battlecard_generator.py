@@ -78,6 +78,32 @@ async def filter_and_extract_diff(client, raw_markdown: str, baseline_summary: s
     diff_data = safe_parse_json(super_response)
     return diff_data, score
 
+# Pass 'client' into the Phase 3 function to maintain the stable connection pool
+async def generate_sales_battlecard(client, competitor_name: str, structured_diff: dict, our_product_context: str):
+    print(f"    [Nemotron 3 Ultra] Synthesizing sales strategy for {competitor_name}...")
+    
+    strategy_prompt = (
+        f"Competitor '{competitor_name}' made this update: {json.dumps(structured_diff)}\n\n"
+        f"Our product baseline capabilities: {our_product_context}\n\n"
+        "Write a strategic sales battlecard. You must output ONLY raw valid JSON with exactly these keys: "
+        "'executive_summary' (string: a 2-sentence bottom-line overview), "
+        "'landmine_questions' (list of 2 strings: trap questions for sales reps to ask prospects to expose the competitor's weakness), "
+        "and 'objection_rebuttal' (string: direct script handling a prospect objection).\n"
+        "Do not include explanation or markdown code fences."
+    )
+
+    ultra_response = await client.chat.completions.create(
+        # Note: If this 404s, replace with exact Ultra ID from Nebius Models Catalog
+        model="nvidia/Nemotron-3-Ultra-550b-a55b", 
+        messages=[
+            {"role": "system", "content": "You are an expert enterprise software sales strategist. Output valid JSON only."},
+            {"role": "user", "content": strategy_prompt}
+        ],
+        temperature=0.2
+    )
+    
+    return safe_parse_json(ultra_response)
+
 async def main():
     db_url = os.environ.get("DATABASE_URL")
     nebius_key = os.environ.get("NEBIUS_API_KEY")
@@ -105,9 +131,12 @@ async def main():
         print(f"Found {len(staging_rows)} unprocessed row(s) in raw_recon_staging.\n")
 
         if not staging_rows:
-            print("No new data to process.")
-            await pool.close()
-            return
+            print("No new data to process. Verify raw_recon_staging has unhandled rows.")
+            return # Safely exit without deadlocking the pool
+
+        # Fetch your own product's context once to use in Phase 3
+        our_product_row = await conn.fetchrow("SELECT name, value_proposition, key_differentiators FROM our_product LIMIT 1")
+        our_context = f"{our_product_row['name']}: {our_product_row['value_proposition']} Differentiators: {our_product_row['key_differentiators']}"
 
         for row in staging_rows:
             staging_id = row['id']
@@ -116,7 +145,11 @@ async def main():
             raw_markdown = row['raw_markdown']
             source_url = row['source_url']
 
-            print(f"--> Processing staging ID {staging_id} ({source_url})")
+            # Fetch competitor name for the prompt
+            comp_row = await conn.fetchrow("SELECT name FROM competitors WHERE id = $1", comp_id)
+            comp_name = comp_row['name']
+
+            print(f"--> Processing staging ID {staging_id} ({comp_name})")
 
             snapshot = await conn.fetchrow(
                 "SELECT baseline_summary FROM competitor_snapshots WHERE competitor_id = $1 AND intel_category = $2",
@@ -125,6 +158,7 @@ async def main():
             baseline = snapshot['baseline_summary'] if snapshot else "No previous baseline available."
 
             try:
+                # PHASE 2: Pass 'client' as the first argument
                 diff_result, score = await filter_and_extract_diff(client, raw_markdown, baseline)
 
                 await conn.execute(
@@ -133,8 +167,30 @@ async def main():
                 )
 
                 if diff_result:
-                    print(f"    [SUCCESS] Semantic Diff Extracted for ID {staging_id}:")
-                    print(json.dumps(diff_result, indent=4))
+                    print(f"    [SUCCESS] Semantic Diff Extracted for {comp_name}")
+                    
+                    # PHASE 3: Generate the battlecard using the diff and client
+                    battlecard = await generate_sales_battlecard(client, comp_name, diff_result, our_context)
+                    
+                    if battlecard:
+                        print(f"    [SUCCESS] Battlecard generated successfully!")
+                        
+                        await conn.execute(
+                            """
+                            INSERT INTO battlecards 
+                            (competitor_id, detected_change_type, executive_summary, previous_state, new_state, landmine_questions, objection_rebuttal, verified_source_url)
+                            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+                            """,
+                            comp_id,
+                            category,
+                            battlecard.get("executive_summary", "No summary generated."),
+                            str(diff_result.get("previous_state", "")),
+                            str(diff_result.get("new_state", "")),
+                            json.dumps(battlecard.get("landmine_questions", [])),
+                            battlecard.get("objection_rebuttal", "No rebuttal generated."),
+                            source_url
+                        )
+
                 print()
 
             except Exception as e:
@@ -142,7 +198,7 @@ async def main():
                 await asyncio.sleep(2) # Brief pause to prevent connection rate limits
 
     await pool.close()
-    print("Phase 2 Execution Complete.")
+    print("Phase 2 & 3 Execution Complete.")
 
 if __name__ == "__main__":
     asyncio.run(main())
