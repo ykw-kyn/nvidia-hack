@@ -1,4 +1,4 @@
-﻿worker/venv/
-worker/__pycache__/
+﻿venv/
+__pycache__/
 worker/.env
 *.pyc
